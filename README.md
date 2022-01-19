@@ -1,5 +1,5 @@
 # Project 5: Web Crawler
-*This project is for Networks and Distributed Systems (CS3700) at Northeastern University.
+*This project is for Networks and Distributed Systems (CS3700) at Northeastern University.*
 ***
 
 Candice Mac and Mouhamadou Sissoko -- 11/19/21
