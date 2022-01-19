@@ -1,11 +1,12 @@
 # Project 5: Web Crawler
+*This project is for Networks and Distributed Systems (CS3700) at Northeastern University.
 ***
+
 Candice Mac and Mouhamadou Sissoko -- 11/19/21
 
 This program represents a web crawler that searches through pages and links on a server.
 
 ## Important Modules
-***
 * **argparse:** used to parsing arguments from the command line.
 * **socket:** used for creating sockets and connecting to server. 
 * **ssl:** used to create secure connections. 
@@ -14,7 +15,6 @@ This program represents a web crawler that searches through pages and links on a
 * **BeautifulSoup**: used to parse HTML. 
 
 ## Key Features
-***
 
 ### Connection Establishment and Maintenance
 We decided to implement the <em>Connection: Keep-Alive</em> functionality. When establishing a 
@@ -48,12 +48,10 @@ After a page has been visited, its URL is stored in a list of visited URLs. Befo
 confirms that the URL has not been visited already.
 
 ## Challenges
-***
 We ran into problems with updating cookies, not realizing that the previous cookie had to be saved in the case where a response
 did not specify new cookie values. The crawler also took a long time to run the page, so we had to implement <em>keep-alive</em>
 so that the runtime of the program was not uncomfortably long. 
 
 ## Testing
-***
 We ran the Makefile and the webcrawler program on the Khoury server to see if the expected flags were received within
 a reasonable amount of time. 
