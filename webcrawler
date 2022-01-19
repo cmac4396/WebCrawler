@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+import copy
+import socket
+import ssl
+import argparse
+import sys
+from bs4 import BeautifulSoup
+global s
+
+def initCommandLine(args):
+    """initializes the command line arguments required for this program"""
+    parser = argparse.ArgumentParser(usage="./webcrawler [username] [password]")
+    parser.add_argument("username")
+    parser.add_argument("password")
+    args = parser.parse_args(args)
+    return args
+
+def create_socket():
+    """creates a socket connected to the assigned host and port"""
+
+    while True:
+        try:
+            s = socket.socket()
+            s.settimeout(30)
+
+            host = socket.gethostbyname('fakebook.3700.network')
+            port = 443
+
+            s.connect((host, port))
+
+            # wrap in TLS
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS)
+            s = context.wrap_socket(s)
+
+            return s
+        except:
+            s.unwrap()
+            s.close()
+            continue
+
+def create_get_message(host, path, cookie):
+    """creates a GET request with the given host, path, and cookies from previous response"""
+    message = f'GET /{path} HTTP/1.1\r\n' \
+             + f'Host: {host}\r\n' \
+             + 'Connection: keep-alive'
+
+    # add cookie attribute if there is one present
+    if cookie is not None and len(cookie) > 0:
+        cookie_as_string = cookie[0]
+        if len(cookie) > 1:
+            session_id_string = "; " + cookie[1]
+            cookie_as_string += session_id_string
+
+        message += f'\r\nCookie: {cookie_as_string}'
+
+    message += '\r\n\r\n'
+
+    return bytes(message, 'utf-8')
+
+def create_login_message(get_response, username, password, host, path):
+    """creates the login (POST) request """
+    # cookie and middleware token are from a get request to the login page
+    cookie = get_cookie(get_response)
+    middleware_token = get_middleware_token(get_response)
+
+    body = f'username={username}&password={password}&csrfmiddlewaretoken={middleware_token}&next=\r\n\r\n'
+
+    header = f'POST /{path} HTTP/1.1\r\n' \
+              + 'Content-Type: application/x-www-form-urlencoded\r\n' \
+              + f'Content-Length: {len(body.encode("utf-8"))}\r\n' \
+              + f'Host: {host}\r\n' \
+              + 'Connection: keep-alive\r\n' \
+              + f'Cookie: {cookie[0]}\r\n\r\n'
+
+    message = header + body
+    message = message.encode("utf-8")
+    return message
+
+def read_response(s):
+    """reads the response after sending a request"""
+    response = ""
+    while True:
+        # read data until endline or exception
+        try:
+            receivedData = s.recv(8192)
+            if receivedData:
+                response += receivedData.decode()
+                if receivedData.find("</html>".encode()) >= 0:
+                    # reached the end of the response and HTML portion
+                    break
+            else:
+                break
+
+        except:
+            # response will most likely be empty if there is an exception
+            break
+
+    # update connection status based on response
+    handle_connection_status(response)
+    # record response for cookies
+    return response
+
+def get_cookie(response):
+    """parses the new cookie to be used from a response"""
+    response_lines = response.splitlines()
+
+    cookie = []
+
+    for line in response_lines:
+        if "Set-Cookie:" in line:
+            cookie_value = line[12:line.index(";")]
+            if "csrftoken=" in line:
+                cookie.append(cookie_value.strip())
+            elif "sessionid" in line:
+                cookie.append(cookie_value.strip())
+
+    return copy.deepcopy(cookie)
+
+def update_connection_status(response):
+    """ Returns True if the connection status is keep alive. Returns False if the connection is close"""
+    response_lines = response.splitlines()
+    if(len(response_lines) > 4):
+        status = response_lines[5].split("Connection: ")
+        if len(status) > 1:
+            connection_status = status[1]
+        if connection_status == "keep-alive":
+            return True
+        elif connection_status == "close":
+            return False
+        else:
+            # connection status is not updated here
+            return None
+
+def update_cookie(old_cookie, response):
+    """returns the most recent cookie to be used, combining old cookie with Set-Cookie from latest response"""
+    new_cookie = get_cookie(response)
+    merged_cookie = []
+
+    if old_cookie is None or len(new_cookie) == 0:
+        # if there is no new cookie specified, use the old cookie
+        return copy.deepcopy(old_cookie)
+    elif len(new_cookie) == 1:
+        if "csrftoken" in new_cookie[0]:
+            # if a new csrftoken is provided, use the new csrftoken along with the old
+            # sessionid if there is one
+            merged_cookie.append(new_cookie[0])
+
+            if len(old_cookie) > 1:
+                merged_cookie.append(old_cookie[1])
+        elif "sessionid" in new_cookie[0]:
+            # if a new sessionid is provided, use the new sessionid with the old
+            # csrftoken
+            if len(old_cookie) > 1:
+                merged_cookie.append(old_cookie[0])
+
+            merged_cookie.append(new_cookie[0])
+
+        return copy.deepcopy(merged_cookie)
+    elif len(new_cookie) == 2:
+        # if a new sessionid and csrftoken are provided, then use the new cookie
+        return copy.deepcopy(new_cookie)
+
+def get_middleware_token(response):
+    """gets the middleware token from a response with a form in the HTML"""
+    response_lines = response.splitlines()
+
+    for line in response_lines:
+        if "csrfmiddlewaretoken" in line:
+            beginning_token_index = line.index("value=") + 7
+            ending_token_index = line.index(">") - 1
+            return line[beginning_token_index:ending_token_index]
+
+def get_status_code(response):
+    """gets the status code of an HTTP response"""
+    response_lines = response.splitlines()
+
+    first_line = response_lines[0]
+    beginning_index = first_line.index("HTTP/1.1") + 9
+    status_code = first_line[beginning_index:beginning_index + 3]
+
+    return int(status_code)
+
+def get_new_location(response):
+    """gets the suggested location of a redirect HTTP response"""
+    response_lines = response.splitlines()
+
+    for line in response_lines:
+        if "Location" in line:
+            beginning_token_index = line.index("/") + 1
+            path = line[beginning_token_index:].strip()
+            return path
+
+def handle_status_code(request, response, host, cookie):
+    """if a response warrants extra action before sending a new request, performs that action"""
+    global s
+
+    status_code = get_status_code(response)
+    if status_code_valid(status_code):
+        # if response is successful or indicates a bad URL, do not do anything and move on
+        return request, response
+    elif status_code == 302:
+        # if response is 302, get the URL specified by response
+        new_request = create_get_message(host, get_new_location(response), cookie)
+        new_response = ""
+        while new_response == "":
+            s.sendall(new_request)
+            new_response = read_response(s)
+        return new_request, new_response
+    elif status_code == 500:
+        # if response is 500, resend the request until a good response is received
+        new_request = create_get_message(host, get_path_from_request(request), cookie)
+        new_response = ""
+        while new_response == "":
+            s.sendall(new_request)
+            new_response = read_response(s)
+        return new_request, new_response
+    else:
+        return None, None
+
+def handle_connection_status(new_response):
+    """reestablishes connection to server if needed"""
+    global s
+
+    # finds the connection status from the latest response
+    connectionStatus = update_connection_status(new_response)
+
+    if not connectionStatus:
+        # if the connection has been closed, close the corresponding socket and create a new one
+        s.close()
+        s = create_socket()
+
+
+def get_path_from_request(request):
+    """gets the path used in the request message"""
+    request = request.decode()
+
+    beginning_index = request.index("/") + 1
+    ending_index = request.index("HTTP") - 1
+
+    return request[beginning_index:ending_index].strip()
+
+def status_code_valid(status_code):
+    """returns true if the status code seen in a response should not warrant further action"""
+    return status_code == 200 or status_code == 403 or status_code == 404
+
+def handle_until_success(initial_request, initial_response, host, cookie):
+    """sends a request until no retry is necessary"""
+    request = initial_request
+    response = initial_response
+
+    # if the status code is 302 or 500, retry is needed
+    redirect_needed = not status_code_valid(get_status_code(response))
+    # continue to retry until bad status code is found or retry no longer needed (bad website or success)
+    while redirect_needed is not None and redirect_needed:
+        cookie = update_cookie(cookie, response)
+        request, response = handle_status_code(request, response, host, cookie)
+        redirect_needed = not status_code_valid(get_status_code(response))
+
+    # record the request and response to be used for generating cookies
+    return request, response
+
+def find_urls(response, unsearched_urls, searched_urls):
+    """finds relative urls in the html page of an http response"""
+    parser = BeautifulSoup(response, 'html.parser')
+
+    urls = []
+    for hyperlink_element in parser.find_all('a', href=True):
+        # get rid of initial slash in url
+        hyperlink = hyperlink_element['href'][1:]
+        # check if url begins with /fakebook/ and check if the url is going to be or has been
+        # searched for flags
+        if 'fakebook/' in hyperlink and hyperlink.index('fakebook/') == 0\
+                and hyperlink not in unsearched_urls\
+                and hyperlink not in searched_urls:
+            urls.append(hyperlink)
+
+    return urls
+
+def parse_flag(secret_flag_html):
+    """parses the secret flag value from its html"""
+    secret_flag_html = str(secret_flag_html)
+    beginning_index = secret_flag_html.index("FLAG: ") + 6
+    ending_index = secret_flag_html.index("</h2>")
+
+    flag_value = secret_flag_html[beginning_index:ending_index]
+    return flag_value
+
+def find_secret_flags(response):
+    """finds secret flags in the html page of an http response"""
+    parser = BeautifulSoup(response, 'html.parser')
+
+    secret_flags = []
+    for secret_flag_element in parser.find_all('h2', {'class': 'secret_flag'}, {'style': "color_red"}):
+        # find element with secret flag in HTML and get actual flag value
+        secret_flag = parse_flag(secret_flag_element)
+
+        # check if secret flag is 64 bytes long
+        if len(secret_flag.encode('utf-8')) == 64:
+            secret_flags.append(secret_flag)
+
+    return copy.deepcopy(secret_flags)
+
+def main(args):
+    global s
+    s = create_socket()
+    HOST = "fakebook.3700.network"
+    USER = args.username
+    PASS = args.password
+    cookie = []
+
+    # get login page to submit login info
+    login_path = "accounts/login/?next=/fakebook/"
+    login_get_response = ""
+
+    # send and read a response until successful
+    while login_get_response == "":
+        login_get_request = create_get_message(HOST, login_path, cookie)
+        s.sendall(login_get_request)
+        login_get_response = read_response(s)
+
+    # update cookie before and after redirect
+    cookie = update_cookie(cookie, login_get_response)
+    login_get_request, login_get_response = handle_until_success(login_get_request, login_get_response, HOST, cookie)
+    cookie = update_cookie(cookie, login_get_response)
+
+    # submit login info through form
+    login_post_response = ""
+    while login_post_response == "":
+        login_post_request = create_login_message(login_get_response, USER, PASS, HOST, login_path)
+        s.sendall(login_post_request)
+        login_post_response = read_response(s)
+
+    # update cookie before and after redirect
+    cookie = update_cookie(cookie, login_post_response)
+    login_post_request, login_post_response = handle_until_success(login_post_request, login_post_response, HOST, cookie)
+    cookie = update_cookie(cookie, login_post_response)
+    # look for secret flags
+    # list of links to the pages that have or have not been searched for secret flags
+    # start at the root /fakebook/ URL
+    unsearched_urls = ["fakebook/"]
+    searched_urls = []
+    # list of secret flags found
+    secret_flags = []
+
+    # search for flags until there are no more flags to search
+    while len(unsearched_urls) > 0 and len(secret_flags) < 5:
+        # get the next link in the stack to process
+        current_url = unsearched_urls.pop(0)
+
+        # retrieve the page on the website at this link
+        get_url_request = create_get_message(HOST, current_url, cookie)
+        get_url_response = ""
+
+        # read response until one is received successfully
+        while get_url_response == "":
+            s.sendall(get_url_request)
+            get_url_response = read_response(s)
+        cookie = update_cookie(cookie, get_url_response)
+
+        # indicate that the current url has been searched for secret flags because it will
+        # be redirected to the page to be searched
+        searched_urls.append(current_url)
+
+        # redirect if needed
+        get_url_request, get_url_response = handle_until_success(get_url_request, get_url_response, HOST, cookie)
+
+        cookie = update_cookie(cookie, get_url_response)
+
+        # indicate that successful (possibly redirected) url has been searched for secret flags
+        if get_path_from_request(get_url_request) not in searched_urls:
+            searched_urls.append(get_path_from_request(get_url_request))
+
+        # find and add secret flags
+        flags_on_page = find_secret_flags(get_url_response)
+
+        if  flags_on_page is not None:
+            for secret_flag in flags_on_page:
+                secret_flags.append(secret_flag)
+
+        # find and add valid urls
+        if find_urls(get_url_response, unsearched_urls, searched_urls) is not None:
+            for valid_url in find_urls(get_url_response, unsearched_urls, searched_urls):
+                unsearched_urls.append(valid_url)
+
+        # print(len(searched_urls))
+
+    # after search is over, write flags to STDOUT
+    for secret_flag in secret_flags:
+        sys.stdout.buffer.write(secret_flag.encode())
+        # print(secret_flag)
+
+main(initCommandLine(sys.argv[1:]))
